@@ -6,11 +6,9 @@ CMDS ?= $(wildcard $(CMD_DIR)/*)
 
 BUILD_DIR ?= ./build
 CMD_DIR ?= ./cmd
-INC_DIR ?= ./inc
 LIB_DIR ?= ./lib
 TEST_DIR ?= ./tests
 
-INCS := $(shell find $(INC_DIR) -regex '.+\.h')
 OBJS := $(SRCS:%.c=$(BUILD_DIR)/%.o)
 
 CC := clang

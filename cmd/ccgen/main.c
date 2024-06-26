@@ -1,13 +1,11 @@
 #include <ctype.h>
+#include <errno.h>
 #include <libgen.h>
-#include <stdint.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-
-#define XSTD_IMPLEMENTATION
-#include "xstd.h"
 
 static int set_ccgen_env(char *filename) {
   filename = realpath(filename, NULL);
@@ -30,100 +28,101 @@ static int set_ccgen_env(char *filename) {
   return 0;
 }
 
-typedef Result(char, int) ReadCharResult;
-static ReadCharResult read_char(Reader *reader) {
-  uint8_t current_char = 0;
-  size_t read = 0;
-  int err = 0;
-  reader_read(reader, &current_char, sizeof(current_char), &read, &err);
-  if (read > 0)
-    return ResultOk(ReadCharResult, current_char);
-
-  return ResultError(ReadCharResult, err);
+/**
+ * read_char reads a single byte from f.
+ */
+static size_t read_char(FILE *f, char *c) {
+  return fread(c, sizeof(char), 1, f);
 }
 
-typedef Result(Slice, int) ReadLineResult;
-static ReadLineResult read_line(Reader *reader, BytesBuffer *buf) {
-  bytes_buffer_reset(buf);
+static size_t read_line(FILE *f, char **buf, size_t *buf_cap) {
+  size_t buf_len = 0;
 
-  ReadCharResult result = {0};
   do {
-    result = read_char(reader);
-    if (result_is_err(result)) {
-      if (result.data.err == EOF && bytes_buffer_length(buf) > 0)
-        goto ok;
-      return ResultError(ReadLineResult, result.data.err);
-    }
-
-    bytes_buffer_append_bytes(buf, &result.data.ok, 1);
-  } while (result.data.ok != '\n');
-
-ok:
-  return ResultOk(ReadLineResult, bytes_buffer_bytes(buf));
-}
-
-static int ccgen_reader(Reader *reader, Allocator *allocator) {
-  BytesBuffer buf = bytes_buffer(allocator);
-
-  while (true) {
-    ReadLineResult line_result = read_line(reader, &buf);
-    if (result_is_err(line_result)) {
-      if (line_result.data.err == EOF)
-        break;
-      else {
-        bytes_buffer_destroy(&buf);
-        return line_result.data.err;
+    // Grow buffer if needed.
+    while (buf_len + 1 >= *buf_cap) {
+      *buf_cap = *buf_cap == 0 ? 128 : *buf_cap * 2;
+      *buf = realloc(*buf, *buf_cap);
+      if (*buf == NULL) {
+        perror("realloc() failed");
+        exit(1);
       }
     }
 
-    Slice line = line_result.data.ok;
+    size_t read = read_char(f, &(*buf)[buf_len]);
+    buf_len += read;
+
+    // Read failed, let caller handle error.
+    if (read == 0)
+      goto end;
+
+  } while ((*buf)[buf_len - 1] != '\n');
+
+end:
+  return buf_len;
+}
+
+static int ccgen_file(FILE *f, char **buf, size_t *buf_cap) {
+  while (true) {
+    size_t line_len = read_line(f, buf, buf_cap);
+    if (ferror(f)) {
+      fprintf(stderr, "fread() failed: %zu\n", line_len);
+      return 1;
+    }
+    if (line_len == 0 && feof(f)) {
+      return 0;
+    }
+
+    char *line = *buf;
 
     // Skip whitespaces.
-    while (isspace(line.data[0])) {
-      line = slice(&line.data[1], line.len - 1);
+    while (isspace(line[0])) {
+      line = &line[1];
+      line_len--;
     }
 
     // Skip non comment lines.
-    if (line.len < strlen("//ccgen") || line.data[0] != '/' ||
-        (line.data[1] != '/' && line.data[1] != '*')) {
+    if (line_len < strlen("//ccgen") || line[0] != '/' ||
+        (line[1] != '/' && line[1] != '*')) {
       goto nextline;
     }
 
     // Only multiline (/* foo ... */) comment on a single line are
     // supported.
-    if (line.data[1] == '*') {
-      for (size_t i = 0; i < line.len - 2; i++) {
-        if (line.data[i] == '\n')
+    if (line[1] == '*') {
+      for (size_t i = 0; i < line_len - 2; i++) {
+        if (line[i] == '\n')
           goto nextline;
 
         // Close comment.
-        if (line.data[i] == '*' && line.data[i + 1] == '/') {
-          line.len = i + 1;
+        if (line[i] == '*' && line[i + 1] == '/') {
+          line_len = i + 1;
           break;
         }
       }
     }
     // Replace '\n' or '*/' by '\0'
-    line.data[line.len - 1] = '\0';
+    line[line_len - 1] = '\0';
 
     // Remove /* or //
-    line.data = &line.data[2];
-    line.len -= 2;
+    line = &line[2];
+    line_len -= 2;
 
     // Skip whitespaces after start comment token.
-    while (isspace(line.data[0])) {
-      line = slice(&line.data[1], line.len - 1);
+    while (isspace(line[0])) {
+      line = &line[1];
+      line_len--;
     }
 
     // Skip non ccgen comments.
-    if (strncmp((const char *)line.data, "ccgen:", strlen("ccgen:")) != 0)
+    if (strncmp(line, "ccgen:", strlen("ccgen:")) != 0)
       goto nextline;
 
     // Strip prefix "ccgen:"
-    line.data = &line.data[strlen("ccgen:")];
-    line.len -= strlen("ccgen:");
+    line = &line[strlen("ccgen:")];
+    line_len -= strlen("ccgen:");
 
-    int exit_code = system((const char *)line.data);
+    int exit_code = system(line);
     if (exit_code)
       return exit_code;
 
@@ -141,6 +140,9 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  char *buf = NULL;
+  size_t buf_cap = 0;
+
   for (int i = 1; i < argc; i++) {
     FILE *f = fopen(argv[i], "r");
     if (!f) {
@@ -155,13 +157,14 @@ int main(int argc, char **argv) {
       return exit_code;
     }
 
-    FileReader freader = file_reader(f);
-    exit_code = ccgen_reader(&freader.iface, g_libc_allocator);
+    exit_code = ccgen_file(f, &buf, &buf_cap);
     if (exit_code) {
       fprintf(stderr, "failed to process file %s: %s\n", argv[i],
               strerror(exit_code));
       return exit_code;
     }
+
+    fclose(f);
   }
 
   return exit_code;
