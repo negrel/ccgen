@@ -1,5 +1,7 @@
 #!/usr/bin/env -S bats --verbose-run
 
+bats_require_minimum_version 1.5.0
+
 TESTS_DIR="./tests"
 
 @test "ccgen on simple c file" {
@@ -13,3 +15,6 @@ TESTS_DIR="./tests"
   [ "$result" = "$expected" ]
 }
 
+@test "ccgen command fail" {
+  run ! ccgen "$TESTS_DIR/ccgen_fail.c"
+}

@@ -133,11 +133,11 @@ static int ccgen_file(FILE *f, char **buf, size_t *buf_cap) {
 }
 
 int main(int argc, char **argv) {
-  int exit_code = 0;
+  int error = 0;
 
   if (argc == 1) {
     fprintf(stderr, "please specify a list of file to scan");
-    return 1;
+    return EXIT_FAILURE;
   }
 
   char *buf = NULL;
@@ -147,25 +147,25 @@ int main(int argc, char **argv) {
     FILE *f = fopen(argv[i], "r");
     if (!f) {
       fprintf(stderr, "failed to open file %s\n", argv[i]);
-      return 1;
+      return EXIT_FAILURE;
     }
 
-    exit_code = set_ccgen_env(argv[i]);
-    if (exit_code) {
+    error = set_ccgen_env(argv[i]);
+    if (error) {
       fprintf(stderr, "failed to putenv CCGEN_FILE for file %s: %s\n", argv[i],
               strerror(errno));
-      return exit_code;
+      return EXIT_FAILURE;
     }
 
-    exit_code = ccgen_file(f, &buf, &buf_cap);
-    if (exit_code) {
+    error = ccgen_file(f, &buf, &buf_cap);
+    if (error) {
       fprintf(stderr, "failed to process file %s: %s\n", argv[i],
-              strerror(exit_code));
-      return exit_code;
+              strerror(error));
+      return EXIT_FAILURE;
     }
 
     fclose(f);
   }
 
-  return exit_code;
+  return error;
 }
